@@ -1,22 +1,46 @@
+**Facial Emotion Detection using OpenCV**
 
-**Emotion Detection using Machine Learning**
+This project detects human emotions from facial expressions using Computer Vision. OpenCV's Haar cascade locates faces in an image, and each face is classified by the pretrained FER+ deep learning model (ONNX) running on OpenCV's DNN module.
 
-This project detects emotions from text using Natural Language Processing (NLP) and Machine Learning techniques. It uses TF-IDF for text feature extraction and Logistic Regression for emotion classification. The model analyzes input text and predicts the corresponding emotion based on learned patterns.
+**Detected emotions:** neutral, happiness, surprise, sadness, anger, disgust, fear, contempt
 
 **Technologies Used:**
 
 * Python
-* Machine Learning
-* Natural Language Processing (NLP)
-* TF-IDF Vectorization
-* Logistic Regression
-* Pandas and Scikit-learn
+* OpenCV (Haar cascade face detection + DNN module)
+* FER+ emotion recognition model (ONNX)
+* NumPy
+* Streamlit
 
 **Key Features:**
 
-* Text-based emotion classification
-* Text preprocessing and feature extraction
-* Machine learning model training and prediction
-* Model and vectorizer saved as `.pkl` files for reuse
+* Emotion detection from uploaded images or webcam snapshots (Streamlit app)
+* Real-time emotion detection from a live webcam feed
+* Multiple faces per image, with confidence scores for every emotion
+* Model is downloaded automatically on first run (`python/models/emotion-ferplus-8.onnx`)
 
-**Objective:** To explore how machine learning can identify emotions in text and support sentiment analysis and emotion-aware applications.
+**Web version (deployed on Vercel):** the Next.js app in the repo root runs the same OpenCV pipeline in the browser with OpenCV.js.
+
+**Python version** lives in the `python/` folder.
+
+**Setup:**
+
+```bash
+cd python
+pip install -r requirements.txt
+python emotion_detector.py   # optional: pre-download the model
+```
+
+**Run the web app:**
+
+```bash
+streamlit run app.py
+```
+
+**Run real-time webcam detection** (press `q` to quit):
+
+```bash
+python webcam.py
+```
+
+**Objective:** To explore how computer vision and deep learning can recognize emotions from facial expressions to support emotion-aware applications.

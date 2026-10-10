@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+/python/models/
+.env*.local
+.vercel
+node_modules/
+.next/
+next-env.d.ts
+*.tsbuildinfo
