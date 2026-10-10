@@ -1,160 +1,130 @@
-import { EMOTIONS, type Emotion, type FaceResult } from "./emotions"
+import type { FaceResult } from "./emotions"
 
-/* eslint-disable @typescript-eslint/no-explicit-any -- OpenCV.js ships without type definitions */
-declare global {
-  interface Window {
-    cv?: any
-  }
-}
-
-export type Engine = { cv: any; cascade: any; net: any }
 export type EngineStatus = { stage: string; progress?: number }
+export type Engine = { detect: (image: ImageData) => Promise<FaceResult[]> }
 
-const ASSET_BASE = "/opencv"
-const CASCADE_FILE = "haarcascade_frontalface_default.xml"
-const MODEL_FILE = "emotion-ferplus-8.onnx"
+const WORKER_URL = "/workers/emotion-worker.js"
+const STALL_TIMEOUT_MS = 45_000
+const DETECT_TIMEOUT_MS = 15_000
 
+type WorkerMessage =
+  | { type: "status"; stage: string; progress?: number }
+  | { type: "ready" }
+  | { type: "error"; message: string }
+  | { type: "result"; id: number; faces: FaceResult[] }
+  | { type: "detectError"; id: number; message: string }
+
+type Pending = { resolve: (faces: FaceResult[]) => void; reject: (error: Error) => void; timer: number }
+
+let worker: Worker | null = null
 let enginePromise: Promise<Engine> | null = null
 let statusListener: ((status: EngineStatus) => void) | null = null
+let nextRequestId = 0
+const pending = new Map<number, Pending>()
 
-const report = (status: EngineStatus) => statusListener?.(status)
-
-function loadScript(src: string) {
-  return new Promise<void>((resolve, reject) => {
-    if (document.querySelector("script[data-opencv]")) {
-      resolve()
-      return
-    }
-    const script = document.createElement("script")
-    script.src = src
-    script.async = true
-    script.dataset.opencv = "true"
-    script.onload = () => resolve()
-    script.onerror = () => reject(new Error("Failed to load OpenCV.js"))
-    document.body.appendChild(script)
-  })
+function teardown(reason: string) {
+  worker?.terminate()
+  worker = null
+  enginePromise = null
+  for (const request of pending.values()) {
+    window.clearTimeout(request.timer)
+    request.reject(new Error(reason))
+  }
+  pending.clear()
 }
 
-async function waitForRuntime() {
-  for (let attempt = 0; attempt < 900; attempt++) {
-    const cv = window.cv
-    if (cv instanceof Promise) {
-      window.cv = await cv
-      continue
-    }
-    if (cv?.Mat && cv.FS_createDataFile && cv.readNet) return cv
-    await new Promise((resolve) => setTimeout(resolve, 100))
+function createEngine(target: Worker): Engine {
+  return {
+    detect(image) {
+      if (worker !== target) return Promise.reject(new Error("The detector stopped. Retry loading it."))
+      const id = ++nextRequestId
+      return new Promise<FaceResult[]>((resolve, reject) => {
+        const timer = window.setTimeout(() => {
+          pending.delete(id)
+          reject(new Error("Detection timed out"))
+        }, DETECT_TIMEOUT_MS)
+        pending.set(id, { resolve, reject, timer })
+        target.postMessage(
+          { type: "detect", id, width: image.width, height: image.height, data: image.data },
+          [image.data.buffer],
+        )
+      })
+    },
   }
-  throw new Error("OpenCV.js took too long to initialize")
 }
 
-async function fetchBytes(url: string, onProgress?: (fraction: number) => void) {
-  const response = await fetch(url)
-  if (!response.ok) throw new Error(`Failed to download ${url}`)
-  const total = Number(response.headers.get("content-length")) || 0
-  if (!response.body || !total || !onProgress) return new Uint8Array(await response.arrayBuffer())
-
-  const reader = response.body.getReader()
-  const chunks: Uint8Array[] = []
-  let received = 0
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    chunks.push(value)
-    received += value.length
-    onProgress(Math.min(1, received / total))
-  }
-  const bytes = new Uint8Array(received)
-  let offset = 0
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset)
-    offset += chunk.length
-  }
-  return bytes
-}
-
-export function loadEngine(onStatus: (status: EngineStatus) => void) {
+/**
+ * Starts the OpenCV worker once and shares the result. A failed load is not retried
+ * automatically; call this again (e.g. from a Retry button) to make a fresh attempt.
+ */
+export function loadEngine(onStatus: (status: EngineStatus) => void): Promise<Engine> {
   statusListener = onStatus
-  if (!enginePromise) {
-    enginePromise = (async () => {
-      report({ stage: "Loading OpenCV.js and emotion model", progress: 0 })
-      const [cv, cascadeBytes, modelBytes] = await Promise.all([
-        loadScript(`${ASSET_BASE}/opencv.js`).then(waitForRuntime),
-        fetchBytes(`${ASSET_BASE}/${CASCADE_FILE}`),
-        fetchBytes(`${ASSET_BASE}/${MODEL_FILE}`, (progress) =>
-          report({ stage: "Downloading emotion model", progress }),
-        ),
-      ])
+  if (enginePromise) return enginePromise
 
-      report({ stage: "Initializing networks" })
-      cv.FS_createDataFile("/", CASCADE_FILE, cascadeBytes, true, false, false)
-      cv.FS_createDataFile("/", MODEL_FILE, modelBytes, true, false, false)
+  enginePromise = new Promise<Engine>((resolve, reject) => {
+    const target = new Worker(WORKER_URL)
+    worker = target
+    let settled = false
+    let stallTimer = 0
 
-      const cascade = new cv.CascadeClassifier()
-      if (!cascade.load(CASCADE_FILE)) throw new Error("Could not load the face detector")
-      const net = cv.readNet(MODEL_FILE)
-      return { cv, cascade, net }
-    })().catch((error) => {
-      enginePromise = null
-      throw error
-    })
-  }
+    const fail = (message: string) => {
+      window.clearTimeout(stallTimer)
+      if (worker === target) teardown(message)
+      if (!settled) {
+        settled = true
+        reject(new Error(message))
+      }
+    }
+    const armStallTimer = () => {
+      window.clearTimeout(stallTimer)
+      stallTimer = window.setTimeout(
+        () => fail(`Loading stalled: no progress for ${STALL_TIMEOUT_MS / 1000} seconds`),
+        STALL_TIMEOUT_MS,
+      )
+    }
+
+    target.onmessage = (event: MessageEvent<WorkerMessage>) => {
+      const message = event.data
+      switch (message.type) {
+        case "status":
+          armStallTimer()
+          statusListener?.({ stage: message.stage, progress: message.progress })
+          break
+        case "ready":
+          window.clearTimeout(stallTimer)
+          settled = true
+          resolve(createEngine(target))
+          break
+        case "error":
+          fail(message.message)
+          break
+        case "result":
+        case "detectError": {
+          const request = pending.get(message.id)
+          if (!request) break
+          pending.delete(message.id)
+          window.clearTimeout(request.timer)
+          if (message.type === "result") request.resolve(message.faces)
+          else request.reject(new Error(message.message))
+          break
+        }
+      }
+    }
+    target.onerror = (event) => {
+      event.preventDefault()
+      fail(event.message || "The detector worker crashed")
+    }
+
+    armStallTimer()
+    statusListener?.({ stage: "Starting detector", progress: 0 })
+    target.postMessage({ type: "init" })
+  })
+
   return enginePromise
 }
 
-function softmax(logits: number[]) {
-  const max = Math.max(...logits)
-  const exps = logits.map((value) => Math.exp(value - max))
-  const sum = exps.reduce((total, value) => total + value, 0)
-  return exps.map((value) => value / sum)
-}
-
-export function detectEmotions({ cv, cascade, net }: Engine, canvas: HTMLCanvasElement): FaceResult[] {
-  const src = cv.imread(canvas)
-  const gray = new cv.Mat()
-  const faces = new cv.RectVector()
-  try {
-    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY)
-    const minSide = Math.max(30, Math.floor(Math.min(gray.rows, gray.cols) / 12))
-    cascade.detectMultiScale(gray, faces, 1.1, 5, 0, new cv.Size(minSide, minSide), new cv.Size(0, 0))
-
-    const results: FaceResult[] = []
-    for (let i = 0; i < faces.size(); i++) {
-      const face = faces.get(i)
-      const pad = Math.floor(face.width * 0.1)
-      const x0 = Math.max(0, face.x - pad)
-      const y0 = Math.max(0, face.y - pad)
-      const x1 = Math.min(gray.cols, face.x + face.width + pad)
-      const y1 = Math.min(gray.rows, face.y + face.height + pad)
-
-      const roi = gray.roi(new cv.Rect(x0, y0, x1 - x0, y1 - y0))
-      const resized = new cv.Mat()
-      cv.resize(roi, resized, new cv.Size(64, 64))
-      const blob = cv.blobFromImage(resized, 1, new cv.Size(64, 64), new cv.Scalar(0, 0, 0, 0), false, false)
-      net.setInput(blob)
-      const output = net.forward()
-      const probabilities = softmax(Array.from(output.data32F as Float32Array))
-      roi.delete()
-      resized.delete()
-      blob.delete()
-      output.delete()
-
-      const scores = Object.fromEntries(EMOTIONS.map((emotion, index) => [emotion, probabilities[index]])) as Record<
-        Emotion,
-        number
-      >
-      const topIndex = probabilities.indexOf(Math.max(...probabilities))
-      results.push({
-        box: { x: face.x, y: face.y, width: face.width, height: face.height },
-        emotion: EMOTIONS[topIndex],
-        confidence: probabilities[topIndex],
-        scores,
-      })
-    }
-    return results.sort((a, b) => a.box.x - b.box.x)
-  } finally {
-    src.delete()
-    gray.delete()
-    faces.delete()
-  }
+export function detectEmotions(engine: Engine, canvas: HTMLCanvasElement): Promise<FaceResult[]> {
+  const ctx = canvas.getContext("2d", { willReadFrequently: true })
+  if (!ctx) return Promise.reject(new Error("Canvas is not available"))
+  return engine.detect(ctx.getImageData(0, 0, canvas.width, canvas.height))
 }

@@ -17,29 +17,40 @@ export function ImageView({ engine, onResults }: { engine: Engine; onResults: (r
 
   const analyze = async (blob: Blob) => {
     setError(null)
+    let bitmap: ImageBitmap
     try {
-      const bitmap = await createImageBitmap(blob)
-      const canvas = canvasRef.current
-      const ctx = canvas?.getContext("2d", { willReadFrequently: true })
-      if (!canvas || !ctx) return
-      const scale = Math.min(1, MAX_SIDE / Math.max(bitmap.width, bitmap.height))
-      canvas.width = Math.round(bitmap.width * scale)
-      canvas.height = Math.round(bitmap.height * scale)
-      ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height)
-      bitmap.close()
-
-      const faces = detectEmotions(engine, canvas)
-      drawResults(ctx, faces)
-      setHasImage(true)
-      onResults(faces)
+      bitmap = await createImageBitmap(blob)
     } catch {
       setError("Could not read that image. Please try a JPG or PNG file.")
+      return
+    }
+    const canvas = canvasRef.current
+    const ctx = canvas?.getContext("2d", { willReadFrequently: true })
+    if (!canvas || !ctx) return
+    const scale = Math.min(1, MAX_SIDE / Math.max(bitmap.width, bitmap.height))
+    canvas.width = Math.round(bitmap.width * scale)
+    canvas.height = Math.round(bitmap.height * scale)
+    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height)
+    bitmap.close()
+    setHasImage(true)
+
+    try {
+      const faces = await detectEmotions(engine, canvas)
+      drawResults(ctx, faces)
+      onResults(faces)
+    } catch (err) {
+      setError(`Detection failed: ${err instanceof Error ? err.message : "unknown error"}`)
     }
   }
 
   const loadSample = async () => {
-    const response = await fetch("/sample-face.png")
-    analyze(await response.blob())
+    try {
+      const response = await fetch("/sample-face.png")
+      if (!response.ok) throw new Error()
+      await analyze(await response.blob())
+    } catch {
+      setError("Could not load the sample image.")
+    }
   }
 
   return (

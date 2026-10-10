@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useState } from "react"
-import { Camera, ImageIcon, Loader2 } from "lucide-react"
+import { Camera, ImageIcon, Loader2, RotateCw } from "lucide-react"
 import { loadEngine, type Engine, type EngineStatus } from "@/lib/opencv"
 import type { FaceResult } from "@/lib/emotions"
 import { ImageView } from "./image-view"
@@ -22,15 +22,30 @@ export function EmotionApp() {
   const [mode, setMode] = useState<Mode>("image")
   const [results, setResults] = useState<FaceResult[] | null>(null)
 
+  const [attempt, setAttempt] = useState(0)
+
   useEffect(() => {
     let active = true
-    loadEngine((next) => active && setStatus(next))
-      .then((loaded) => active && setEngine(loaded))
-      .catch((error: Error) => active && setLoadError(error.message))
+    loadEngine((next) => {
+      if (active) setStatus(next)
+    })
+      .then((loaded) => {
+        if (active) setEngine(loaded)
+      })
+      .catch((error: Error) => {
+        if (active) setLoadError(error.message)
+      })
     return () => {
       active = false
     }
-  }, [])
+  }, [attempt])
+
+  const retry = () => {
+    setLoadError(null)
+    setEngine(null)
+    setStatus({ stage: "Starting detector", progress: 0 })
+    setAttempt((value) => value + 1)
+  }
 
   const switchMode = (next: Mode) => {
     setMode(next)
@@ -70,7 +85,15 @@ export function EmotionApp() {
         {loadError ? (
           <div role="alert" className="flex aspect-video flex-col items-center justify-center gap-2 rounded-lg bg-surface-2 p-6 text-center">
             <p className="font-medium">Could not start the detector</p>
-            <p className="text-sm text-muted">{loadError}. Refresh the page to try again.</p>
+            <p className="text-sm text-muted">{loadError}</p>
+            <button
+              type="button"
+              onClick={retry}
+              className="mt-2 inline-flex items-center gap-2 rounded-md bg-accent px-4 py-2 text-sm font-medium text-background transition-opacity hover:opacity-90"
+            >
+              <RotateCw className="size-4" aria-hidden="true" />
+              Retry
+            </button>
           </div>
         ) : !engine ? (
           <div

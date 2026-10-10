@@ -28,14 +28,17 @@ export function WebcamView({ engine, onResults }: { engine: Engine; onResults: (
     timerRef.current = null
     streamRef.current?.getTracks().forEach((track) => track.stop())
     streamRef.current = null
+    const video = videoRef.current
+    if (video) video.srcObject = null
   }
 
   useEffect(() => release, [])
 
-  const analyzeFrame = () => {
+  const analyzeFrame = async (stream: MediaStream) => {
+    timerRef.current = null
     const video = videoRef.current
     const overlay = overlayRef.current
-    if (!video || !overlay || !streamRef.current) return
+    if (!video || !overlay || streamRef.current !== stream) return
 
     if (video.readyState >= 2 && video.videoWidth > 0) {
       const work = (workCanvasRef.current ??= document.createElement("canvas"))
@@ -44,7 +47,18 @@ export function WebcamView({ engine, onResults }: { engine: Engine; onResults: (
       work.height = Math.round(video.videoHeight * scale)
       work.getContext("2d", { willReadFrequently: true })?.drawImage(video, 0, 0, work.width, work.height)
 
-      const faces = detectEmotions(engine, work)
+      let faces: FaceResult[]
+      try {
+        faces = await detectEmotions(engine, work)
+      } catch (err) {
+        if (streamRef.current !== stream) return
+        release()
+        setState("idle")
+        setError(`Detection stopped: ${err instanceof Error ? err.message : "unknown error"}`)
+        return
+      }
+      if (streamRef.current !== stream) return
+
       overlay.width = video.videoWidth
       overlay.height = video.videoHeight
       const ctx = overlay.getContext("2d")
@@ -54,7 +68,9 @@ export function WebcamView({ engine, onResults }: { engine: Engine; onResults: (
       }
       onResultsRef.current(faces)
     }
-    timerRef.current = window.setTimeout(analyzeFrame, FRAME_INTERVAL_MS)
+    if (streamRef.current === stream) {
+      timerRef.current = window.setTimeout(() => analyzeFrame(stream), FRAME_INTERVAL_MS)
+    }
   }
 
   const start = async () => {
@@ -67,11 +83,15 @@ export function WebcamView({ engine, onResults }: { engine: Engine; onResults: (
       })
       streamRef.current = stream
       const video = videoRef.current
-      if (!video) return
+      if (!video) {
+        release()
+        return
+      }
       video.srcObject = stream
       await video.play()
+      if (streamRef.current !== stream) return
       setState("live")
-      analyzeFrame()
+      analyzeFrame(stream)
     } catch (err) {
       release()
       setState("idle")
