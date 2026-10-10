@@ -17,11 +17,16 @@ This project detects human emotions from facial expressions using Computer Visio
 * Emotion detection from uploaded images or webcam snapshots (Streamlit app)
 * Real-time emotion detection from a live webcam feed
 * Multiple faces per image, with confidence scores for every emotion
-* Model is downloaded automatically on first run (`models/emotion-ferplus-8.onnx`)
+* Model is downloaded automatically on first run (`python/models/emotion-ferplus-8.onnx`)
+
+**Web version (deployed on Vercel):** the Next.js app in the repo root runs the same OpenCV pipeline in the browser with OpenCV.js.
+
+**Python version** lives in the `python/` folder.
 
 **Setup:**
 
 ```bash
+cd python
 pip install -r requirements.txt
 python emotion_detector.py   # optional: pre-download the model
 ```
